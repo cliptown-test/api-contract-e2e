@@ -19,7 +19,7 @@ Source organization: `cliptown`
 | Source | Commit | Branch observed |
 |---|---:|---|
 | `cliptown/cliptown-rust-backend.rs` | `1585316b0bcf1c30a6c12f0bdd7140f5765c3074` | `main` |
-| `cliptown/cliptown-clients` | `a325ea7ca9b926400d4189436a384a162810776e` | `main` |
+| `cliptown/cliptown-clients` | `5aab678c860ec748a243522883ba4f1a2bb32c66` | `main` |
 
 ## Dependency lanes
 
