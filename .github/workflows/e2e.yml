@@ -1,0 +1,76 @@
+name: e2e
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '41 5 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      # The suite manages its own container by default; in CI we hand it one via
+      # PG_EXTERNAL so the runner's health checks gate the job start. The
+      # dependency-reflection assertions (H7/H8) deliberately skip under
+      # PG_EXTERNAL rather than destroying a Postgres the suite does not own.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: e2e
+        ports:
+          - 55433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Check out the harness and its pinned submodule
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          show-progress: false
+          submodules: recursive
+          token: ${{ secrets.TEST_FLEET_READ_TOKEN || github.token }}
+
+      - name: Validate the generated contract
+        run: node scripts/validate-plan.mjs
+
+      - name: Install the toolchain the pinned backend declares
+        run: |
+          # cliptown-rust-backend.rs pins rust-toolchain.toml to 1.88.0; honour it
+          # rather than building the pinned SHA with whatever ships on the runner.
+          # --profile minimal keeps rustup from fetching rust-src/rustfmt/clippy,
+          # none of which this suite uses. run-e2e.sh installs this itself if it
+          # is missing; doing it here keeps the build step off the critical path.
+          rustup toolchain install 1.88.0 --profile minimal --no-self-update
+
+      - name: Cache cargo
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cliptown-e2e-cargo-${{ hashFiles('test-plan.json') }}
+          restore-keys: cliptown-e2e-cargo-
+
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Run the live-stack suite
+        env:
+          PG_EXTERNAL: '1'
+          PG_PORT: '55433'
+        run: bash scripts/run-e2e.sh
