@@ -1,0 +1,18 @@
+# Template. scripts/run-e2e.sh substitutes @INTERFACES_PATH@ with the pinned
+# cliptown-interfaces checkout and writes Cargo.toml into its scratch dir, so no
+# machine-specific path is ever committed here.
+[package]
+name = "cliptown-policy-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "cliptown-policy-probe"
+path = "src/main.rs"
+
+[dependencies]
+cliptown-interfaces-rust = { path = "@INTERFACES_PATH@" }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
