@@ -93,12 +93,8 @@ trap cleanup EXIT
 for tool in docker psql curl jq openssl python3 git; do
   command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
-CARGO="cargo"
-if command -v rustup >/dev/null 2>&1 && rustup which cargo >/dev/null 2>&1; then
-  # A Homebrew cargo earlier on PATH resolves a Homebrew rustc, which cannot
-  # find the rustup sysroot's core for this crate graph. Pin both together.
-  CARGO="$(rustup which cargo)"
-fi
+RUSTUP=""
+command -v rustup >/dev/null 2>&1 && RUSTUP="$(command -v rustup)"
 
 # --- 0. materialize the pinned sources ----------------------------------------
 note "materializing pinned sources"
@@ -188,8 +184,34 @@ grant execute on all functions in schema cliptown to cliptown_rls;
 SQL
 
 # --- 2. the real binary -------------------------------------------------------
+# Build with the toolchain the PINNED SOURCE declares, resolved from its own
+# rust-toolchain.toml rather than from whatever `cargo` happens to be first on
+# PATH. Two traps this avoids: a Homebrew cargo shadowing rustup resolves a
+# Homebrew rustc that cannot find the rustup sysroot's core, and `rustup which
+# cargo` run outside the source tree resolves the DEFAULT toolchain, which makes
+# rustup sync a channel this suite never needed.
+RUST_CHANNEL="$(awk -F'"' '/^ *channel *=/ {print $2; exit}' "$SRC/rust-toolchain.toml" 2>/dev/null)"
+cargo_at() { # dir args...
+  local d="$1"; shift
+  if [ -n "$RUSTUP" ] && [ -n "$RUST_CHANNEL" ]; then
+    ( cd "$d" && "$RUSTUP" run "$RUST_CHANNEL" cargo "$@" )
+  else
+    ( cd "$d" && cargo "$@" )
+  fi
+}
+if [ -n "$RUSTUP" ] && [ -n "$RUST_CHANNEL" ]; then
+  if ! "$RUSTUP" run "$RUST_CHANNEL" cargo --version >/dev/null 2>&1; then
+    note "installing the toolchain the pinned source declares ($RUST_CHANNEL)"
+    "$RUSTUP" toolchain install "$RUST_CHANNEL" --profile minimal --no-self-update \
+      >"$WORK/toolchain.log" 2>&1 || { tail -10 "$WORK/toolchain.log"; die "could not install rust $RUST_CHANNEL"; }
+  fi
+  sub "building with rust $RUST_CHANNEL (declared by $(basename "$SRC")/rust-toolchain.toml)"
+else
+  sub "rustup unavailable; building with $(cargo --version 2>&1)"
+fi
+
 note "building the pinned cliptown-api binary"
-( cd "$SRC" && "$CARGO" build --locked --quiet ) >"$WORK/build.log" 2>&1 \
+cargo_at "$SRC" build --locked --quiet >"$WORK/build.log" 2>&1 \
   || { tail -30 "$WORK/build.log"; die "cargo build failed"; }
 BIN="$SRC/target/debug/cliptown-api"
 [ -x "$BIN" ] || die "binary not produced at $BIN"
@@ -982,7 +1004,7 @@ if [ "$PROBE_COPY_OK" = "1" ]; then
 else
   fail "PP0 a probe module copy differs from the pinned source"
 fi
-if ( cd "$PROBE" && CLIPTOWN_BACKEND_SRC="$SRC" "$CARGO" run --quiet ) >"$WORK/probe.out" 2>"$WORK/probe.err"; then
+if cargo_at "$PROBE" run --quiet >"$WORK/probe.out" 2>"$WORK/probe.err"; then
   while IFS='|' read -r verdict id message repro; do
     case "$verdict" in
       PASS)   pass "$id $message" ;;
