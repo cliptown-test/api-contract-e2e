@@ -108,8 +108,8 @@ jobs:
           from pathlib import Path
           p = Path('.typespec-json-schema-validator/negative/typespec/main.tsp')
           text = p.read_text()
-          old = 'repository: string;'
-          new = 'repository: int32;'
+          old = 'generatedWitnessOnly: boolean;'
+          new = 'generatedWitnessOnly: string;'
           assert old in text
           p.write_text(text.replace(old, new, 1))
           PY
