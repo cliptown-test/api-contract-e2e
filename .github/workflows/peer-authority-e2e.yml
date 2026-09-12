@@ -1,0 +1,170 @@
+name: peer-authority-e2e
+
+on:
+  pull_request:
+    paths:
+      - "schema-authority/**"
+      - ".github/workflows/peer-authority-e2e.yml"
+  push:
+    branches: [main]
+    paths:
+      - "schema-authority/**"
+      - ".github/workflows/peer-authority-e2e.yml"
+  schedule:
+    - cron: "19 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: peer-authority-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  peer-authorities:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify checked-out revision
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git diff --check
+
+      - name: Check out immutable TJSV tool
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ORESoftware/typespec-json-schema-validator
+          ref: 93dd73cb246a09b0a1c62d7192cc62ca6ecbe405
+          path: .ci/tjsv
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.16.0
+
+      - name: Bootstrap pinned validator toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --prefix .ci/tjsv
+          npm rebuild --prefix .ci/tjsv @oresoftware/f2e --foreground-scripts
+          node .ci/tjsv/bin/typespec-json-schema-validator.mjs doctor --quiet
+          ln -s "$PWD/.ci/tjsv/node_modules" node_modules
+
+      - name: Record authored-source digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum schema-authority/main.tsp schema-authority/authored.schema.json > "$RUNNER_TEMP/authored.sha256"
+
+      - name: Generate Schema B and compare independent authorities
+        shell: bash
+        run: |
+          set -euo pipefail
+          node .ci/tjsv/bin/typespec-json-schema-validator.mjs check \
+            --typespec=schema-authority/main.tsp \
+            --schema=schema-authority/authored.schema.json \
+            --report=.typespec-json-schema-validator/report.json \
+            --sarif=.typespec-json-schema-validator/report.sarif \
+            --contract-ir=.typespec-json-schema-validator/contract-ir.json \
+            --output-dir=.typespec-json-schema-validator/generated \
+            --seal-object-schemas=false \
+            --max-probes=128
+
+      - name: Require admissible comparison evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { readFileSync } from "node:fs";
+          const report = JSON.parse(readFileSync(".typespec-json-schema-validator/report.json", "utf8"));
+          const ir = JSON.parse(readFileSync(".typespec-json-schema-validator/contract-ir.json", "utf8"));
+          assert.equal(report.status, "passed");
+          assert.equal(ir.admissible, true);
+          NODE
+          test -s .typespec-json-schema-validator/generated/typespec.generated.schema.json
+
+      - name: Prove TypeSpec-only drift is rejected
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.typespec-json-schema-validator/negative/typespec
+          mkdir -p "$root/generated"
+          cp schema-authority/main.tsp "$root/main.tsp"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.typespec-json-schema-validator/negative/typespec/main.tsp')
+          text = p.read_text()
+          old = 'repository: string;'
+          new = 'repository: int32;'
+          assert old in text
+          p.write_text(text.replace(old, new, 1))
+          PY
+          set +e
+          node .ci/tjsv/bin/typespec-json-schema-validator.mjs check \
+            --typespec="$root/main.tsp" \
+            --schema=schema-authority/authored.schema.json \
+            --report="$root/report.json" \
+            --output-dir="$root/generated" \
+            --seal-object-schemas=false \
+            --max-probes=64
+          status=$?
+          set -e
+          test "$status" -eq 2
+
+      - name: Prove JSON-Schema-only drift is rejected
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.typespec-json-schema-validator/negative/json-schema
+          mkdir -p "$root/generated"
+          cp schema-authority/authored.schema.json "$root/authored.schema.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+          const path = ".typespec-json-schema-validator/negative/json-schema/authored.schema.json";
+          const schema = JSON.parse(readFileSync(path, "utf8"));
+          schema.$defs.ContractEnvelope.properties.repository.type = "integer";
+          writeFileSync(path, JSON.stringify(schema, null, 2) + "\n");
+          NODE
+          set +e
+          node .ci/tjsv/bin/typespec-json-schema-validator.mjs check \
+            --typespec=schema-authority/main.tsp \
+            --schema="$root/authored.schema.json" \
+            --report="$root/report.json" \
+            --output-dir="$root/generated" \
+            --seal-object-schemas=false \
+            --max-probes=64
+          status=$?
+          set -e
+          test "$status" -eq 2
+
+      - name: Prove authored authorities remained immutable
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check "$RUNNER_TEMP/authored.sha256"
+          git diff --exit-code -- schema-authority/
+
+      - name: Retain comparison and negative-test evidence
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: peer-authority-e2e-${{ github.run_id }}
+          path: .typespec-json-schema-validator/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
