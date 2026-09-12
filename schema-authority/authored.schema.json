@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/cliptown-test/api-contract-e2e/schema-authority/authored.schema.json",
+  "$defs": {
+    "RuntimeKind": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "RuntimeKind",
+      "type": "string",
+      "enum": ["web", "api"]
+    },
+    "ContractEnvelope": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "ContractEnvelope",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "runtime": { "$ref": "RuntimeKind" },
+        "generatedWitnessOnly": { "type": "boolean" },
+        "owner": { "type": "string", "minLength": 1 }
+      },
+      "required": ["repository", "runtime", "generatedWitnessOnly"]
+    }
+  }
+}
